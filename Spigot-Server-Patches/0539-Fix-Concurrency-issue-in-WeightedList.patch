@@ -6,6 +6,13 @@ Subject: [PATCH] Fix Concurrency issue in WeightedList
 if multiple threads from worldgen sort at same time, it will crash.
 So make a copy of the list for sorting purposes.
 
+<<<<<<< HEAD
+diff --git a/src/main/java/net/minecraft/server/WeightedList.java b/src/main/java/net/minecraft/server/WeightedList.java
+index 73e5969b2a15f1639b6285286820e9f7871c7db8..b4e871140e7a0ab5e402e415ea4ff04605157d54 100644
+--- a/src/main/java/net/minecraft/server/WeightedList.java
++++ b/src/main/java/net/minecraft/server/WeightedList.java
+@@ -14,7 +14,7 @@ import java.util.stream.Stream;
+=======
 diff --git a/src/main/java/net/minecraft/server/BehaviorGate.java b/src/main/java/net/minecraft/server/BehaviorGate.java
 index 4a5b54b44958b7eddaf2cd7bd517647cca96fd62..46e910581210421c8699637431804dc2f43eb4a6 100644
 --- a/src/main/java/net/minecraft/server/BehaviorGate.java
@@ -54,12 +61,20 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
  import java.util.List;
  import java.util.Random;
 @@ -14,26 +14,32 @@ import java.util.stream.Stream;
+>>>>>>> pr/4
  
  public class WeightedList<U> {
  
 -    protected final List<WeightedList.a<U>> a;
 +    protected final List<WeightedList.a<U>> list; // Paper - decompile conflict
      private final Random b;
+<<<<<<< HEAD
+ 
+     public WeightedList() {
+@@ -23,17 +23,17 @@ public class WeightedList<U> {
+ 
+     private WeightedList(List<WeightedList.a<U>> list) {
+=======
 +    private final boolean isUnsafe; // Paper
  
 -    public WeightedList() {
@@ -75,6 +90,7 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
 +    private WeightedList(List<WeightedList.a<U>> list, boolean isUnsafe) {
 +        this.isUnsafe = isUnsafe;
 +        // Paper end
+>>>>>>> pr/4
          this.b = new Random();
 -        this.a = Lists.newArrayList(list);
 +        this.list = Lists.newArrayList(list); // Paper - decompile conflict
@@ -94,7 +110,11 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
          return this;
      }
  
+<<<<<<< HEAD
+@@ -42,21 +42,20 @@ public class WeightedList<U> {
+=======
 @@ -42,21 +48,20 @@ public class WeightedList<U> {
+>>>>>>> pr/4
      }
  
      public WeightedList<U> a(Random random) {
@@ -106,10 +126,17 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
 -        }));
 -        return this;
 +        // Paper start - make concurrent safe, work off a clone of the list
+<<<<<<< HEAD
++        java.util.ArrayList<WeightedList.a<U>> list = new java.util.ArrayList<WeightedList.a<U>>(this.list);
++        list.forEach((weightedlist_a) -> weightedlist_a.a(random.nextFloat()));
++        list.sort(Comparator.comparingDouble(a::c));
++        return new WeightedList<>(list);
+=======
 +        List<WeightedList.a<U>> list = isUnsafe ? new java.util.ArrayList<WeightedList.a<U>>(this.list) : this.list;
 +        list.forEach((weightedlist_a) -> weightedlist_a.a(random.nextFloat()));
 +        list.sort(Comparator.comparingDouble(a::c));
 +        return isUnsafe ? new WeightedList<>(list, isUnsafe) : this;
+>>>>>>> pr/4
 +        // Paper end
      }
  
@@ -124,7 +151,11 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
      }
  
      public U b(Random random) {
+<<<<<<< HEAD
+@@ -64,7 +63,7 @@ public class WeightedList<U> {
+=======
 @@ -64,7 +69,7 @@ public class WeightedList<U> {
+>>>>>>> pr/4
      }
  
      public String toString() {
@@ -133,7 +164,11 @@ index 73e5969b2a15f1639b6285286820e9f7871c7db8..5d9d58411f2fad9d5da703f964d269b4
      }
  
      public static class a<T> {
+<<<<<<< HEAD
+@@ -98,11 +97,7 @@ public class WeightedList<U> {
+=======
 @@ -98,11 +103,7 @@ public class WeightedList<U> {
+>>>>>>> pr/4
              return new Codec<WeightedList.a<E>>() {
                  public <T> DataResult<Pair<WeightedList.a<E>, T>> decode(DynamicOps<T> dynamicops, T t0) {
                      Dynamic<T> dynamic = new Dynamic(dynamicops, t0);

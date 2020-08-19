@@ -25,10 +25,10 @@ Massive update to light to improve performance and chunk loading/generation.
 8) Fix NPE risk that crashes server in getting nibble data
 
 diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
-index 7c87ef638d538093e944341525a1027be5d15a0e..3a5a9aba111fed8b68818b95332b723ee2bce2ac 100644
+index 604e7004b659daed2844ba1a76bf09288ec549e5..ef980f9859d1d7d0d5e13d0d70e998055f92135e 100644
 --- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
 +++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
-@@ -1045,7 +1045,7 @@ public class ChunkProviderServer extends IChunkProvider {
+@@ -1044,7 +1044,7 @@ public class ChunkProviderServer extends IChunkProvider {
              if (ChunkProviderServer.this.tickDistanceManager()) {
                  return true;
              } else {
@@ -1027,25 +1027,30 @@ index a35e7b392c74fadf2760d1fc2021e98d33858cb5..944094e8e770cc8c0205ef2aa6c48fff
                                  lightenginelayer.a(Long.MAX_VALUE, l3, 15, false);
                              }
 diff --git a/src/main/java/net/minecraft/server/LightEngineThreaded.java b/src/main/java/net/minecraft/server/LightEngineThreaded.java
-index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd00b63172 100644
+index a9dc8466278f9ec2becbcb643e6e1c973df72b82..968a1f71a44122ef0c4236d4251497f0b813d3b9 100644
 --- a/src/main/java/net/minecraft/server/LightEngineThreaded.java
 +++ b/src/main/java/net/minecraft/server/LightEngineThreaded.java
-@@ -15,15 +15,158 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
+@@ -14,8 +14,98 @@ import org.apache.logging.log4j.Logger;
+ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
  
      private static final Logger LOGGER = LogManager.getLogger();
-     private final ThreadedMailbox<Runnable> b;
+-    private final ThreadedMailbox<Runnable> b;
 -    private final ObjectList<Pair<LightEngineThreaded.Update, Runnable>> c = new ObjectArrayList();
--    private final PlayerChunkMap d;
++    private final ThreadedMailbox<Runnable> b; ThreadedMailbox<Runnable> mailbox; // Paper
 +    // Paper start
 +    private static final int MAX_PRIORITIES = PlayerChunkMap.GOLDEN_TICKET + 2;
 +
-+    private boolean isChunkLightStatus(long pair) {
-+        PlayerChunk playerChunk = playerChunkMap.getUpdatingChunk(pair);
-+        if (playerChunk == null) {
-+            return false;
-+        }
-+        ChunkStatus status = PlayerChunk.getChunkStatus(playerChunk.getTicketLevel());
-+        return status != null && status.isAtLeastStatus(ChunkStatus.LIGHT);
++    public void changePriority(long pair, int currentPriority, int priority) {
++        this.mailbox.queue(() -> {
++            ChunkLightQueue remove = this.queue.buckets[currentPriority].remove(pair);
++            if (remove != null) {
++                ChunkLightQueue existing = this.queue.buckets[priority].put(pair, remove);
++                if (existing != null) {
++                    remove.pre.addAll(existing.pre);
++                    remove.post.addAll(existing.post);
++                }
++            }
++        });
 +    }
 +
 +    static class ChunkLightQueue {
@@ -1056,30 +1061,12 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +        ChunkLightQueue(long chunk) {}
 +    }
 +
-+    static class PendingLightTask {
-+        long chunkId;
-+        IntSupplier priority;
-+        Runnable pre;
-+        Runnable post;
-+        boolean fastUpdate;
-+
-+        public PendingLightTask(long chunkId, IntSupplier priority, Runnable pre, Runnable post, boolean fastUpdate) {
-+            this.chunkId = chunkId;
-+            this.priority = priority;
-+            this.pre = pre;
-+            this.post = post;
-+            this.fastUpdate = fastUpdate;
-+        }
-+    }
-+
 +
 +    // Retain the chunks priority level for queued light tasks
-+    class LightQueue {
++    private static class LightQueue {
 +        private int size = 0;
 +        private int lowestPriority = MAX_PRIORITIES;
 +        private final it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<ChunkLightQueue>[] buckets = new it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap[MAX_PRIORITIES];
-+        private final java.util.concurrent.ConcurrentLinkedQueue<PendingLightTask> pendingTasks = new java.util.concurrent.ConcurrentLinkedQueue<>();
-+        private final java.util.concurrent.ConcurrentLinkedQueue<Runnable> priorityChanges = new java.util.concurrent.ConcurrentLinkedQueue<>();
 +
 +        private LightQueue() {
 +            for (int i = 0; i < buckets.length; i++) {
@@ -1087,45 +1074,18 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +            }
 +        }
 +
-+        public void changePriority(long pair, int currentPriority, int priority) {
-+            this.priorityChanges.add(() -> {
-+                ChunkLightQueue remove = this.buckets[currentPriority].remove(pair);
-+                if (remove != null) {
-+                    ChunkLightQueue existing = this.buckets[priority].put(pair, remove);
-+                    if (existing != null) {
-+                        remove.pre.addAll(existing.pre);
-+                        remove.post.addAll(existing.post);
-+                    }
-+                }
-+                if (!this.buckets[priority].isEmpty()) {
-+                    if (lowestPriority > priority) {
-+                        lowestPriority = priority;
-+                    }
-+                }
-+            });
++        public final void add(long chunkId, int priority, LightEngineThreaded.Update type, Runnable run) {
++            add(chunkId, priority, type, run, false);
 +        }
-+
-+        public final void addChunk(long chunkId, IntSupplier priority, Runnable pre, Runnable post) {
-+            pendingTasks.add(new PendingLightTask(chunkId, priority, pre, post, true));
-+            queueUpdate();
-+        }
-+
-+        public final void add(long chunkId, IntSupplier priority, LightEngineThreaded.Update type, Runnable run) {
-+            pendingTasks.add(new PendingLightTask(chunkId, priority, type == Update.PRE_UPDATE ? run : null, type == Update.POST_UPDATE ? run : null, false));
-+        }
-+        public final void add(PendingLightTask update) {
-+            int priority = update.priority.getAsInt();
-+            ChunkLightQueue lightQueue = this.buckets[priority].computeIfAbsent(update.chunkId, ChunkLightQueue::new);
-+
-+            if (update.pre != null) {
-+                this.size++;
-+                lightQueue.pre.add(update.pre);
++        public final void add(long chunkId, int priority, LightEngineThreaded.Update type, Runnable run, boolean shouldFastUpdate) {
++            ChunkLightQueue lightQueue = this.buckets[priority].computeIfAbsent(chunkId, ChunkLightQueue::new);
++            this.size++;
++            if (type == Update.PRE_UPDATE) {
++                lightQueue.pre.add(run);
++            } else {
++                lightQueue.post.add(run);
 +            }
-+            if (update.post != null) {
-+                this.size++;
-+                lightQueue.post.add(update.post);
-+            }
-+            if (update.fastUpdate) {
++            if (shouldFastUpdate) {
 +                lightQueue.shouldFastUpdate = true;
 +            }
 +
@@ -1135,7 +1095,7 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +        }
 +
 +        public final boolean isEmpty() {
-+            return this.size == 0 && this.pendingTasks.isEmpty();
++            return this.size == 0;
 +        }
 +
 +        public final int size() {
@@ -1143,25 +1103,13 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +        }
 +
 +        public boolean poll(java.util.List<Runnable> pre, java.util.List<Runnable> post) {
-+            PendingLightTask pending;
-+            while ((pending = pendingTasks.poll()) != null) {
-+                add(pending);
-+            }
-+            Runnable run;
-+            while ((run = priorityChanges.poll()) != null) {
-+                run.run();
-+            }
 +            boolean hasWork = false;
 +            it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<ChunkLightQueue>[] buckets = this.buckets;
 +            while (lowestPriority < MAX_PRIORITIES && !isEmpty()) {
 +                it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<ChunkLightQueue> bucket = buckets[lowestPriority];
 +                if (bucket.isEmpty()) {
 +                    lowestPriority++;
-+                    if (hasWork && lowestPriority <= 3) {
-+                        return true;
-+                    } else {
-+                        continue;
-+                    }
++                    continue;
 +                }
 +                ChunkLightQueue queue = bucket.removeFirst();
 +                this.size -= queue.pre.size() + queue.post.size();
@@ -1178,73 +1126,59 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +        }
 +    }
 +
-+    final LightQueue queue = new LightQueue();
++    private final LightQueue queue = new LightQueue();
 +    // Paper end
-+    private final PlayerChunkMap d; private final PlayerChunkMap playerChunkMap; // Paper
+     private final PlayerChunkMap d;
      private final Mailbox<ChunkTaskQueueSorter.a<Runnable>> e;
      private volatile int f = 5;
-     private final AtomicBoolean g = new AtomicBoolean();
- 
-     public LightEngineThreaded(ILightAccess ilightaccess, PlayerChunkMap playerchunkmap, boolean flag, ThreadedMailbox<Runnable> threadedmailbox, Mailbox<ChunkTaskQueueSorter.a<Runnable>> mailbox) {
+@@ -25,7 +115,7 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
          super(ilightaccess, true, flag);
--        this.d = playerchunkmap;
-+        this.d = playerchunkmap; this.playerChunkMap = d; // Paper
+         this.d = playerchunkmap;
          this.e = mailbox;
-         this.b = threadedmailbox;
+-        this.b = threadedmailbox;
++        this.mailbox = this.b = threadedmailbox; // Paper
      }
-@@ -110,13 +253,9 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
-     }
+ 
+     public void close() {}
+@@ -111,8 +201,11 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
  
      private void a(int i, int j, IntSupplier intsupplier, LightEngineThreaded.Update lightenginethreaded_update, Runnable runnable) {
--        this.e.a(ChunkTaskQueueSorter.a(() -> {
+         this.e.a(ChunkTaskQueueSorter.a(() -> {
 -            this.c.add(Pair.of(lightenginethreaded_update, runnable));
 -            if (this.c.size() >= this.f) {
--                this.b();
--            }
--
--        }, ChunkCoordIntPair.pair(i, j), intsupplier));
-+        // Paper start - replace method
-+        this.queue.add(ChunkCoordIntPair.pair(i, j), intsupplier, lightenginethreaded_update, runnable);
-+        // Paper end
-     }
++            // Paper start
++            int priority = intsupplier.getAsInt();
++            this.queue.add(ChunkCoordIntPair.pair(i, j), priority, lightenginethreaded_update, runnable); // Paper
++            if (priority <= 25) { // don't auto kick off unless priority
++                // Paper end
+                 this.b();
+             }
  
-     @Override
-@@ -133,8 +272,20 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
-     public CompletableFuture<IChunkAccess> a(IChunkAccess ichunkaccess, boolean flag) {
+@@ -134,7 +227,14 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
          ChunkCoordIntPair chunkcoordintpair = ichunkaccess.getPos();
  
--        ichunkaccess.b(false);
+         ichunkaccess.b(false);
 -        this.a(chunkcoordintpair.x, chunkcoordintpair.z, LightEngineThreaded.Update.PRE_UPDATE, SystemUtils.a(() -> {
 +        // Paper start
-+        //ichunkaccess.b(false); // Don't need to disable this
 +        long pair = chunkcoordintpair.pair();
 +        CompletableFuture<IChunkAccess> future = new CompletableFuture<>();
-+        IntSupplier prioritySupplier = playerChunkMap.getPrioritySupplier(pair);
-+        boolean[] skippedPre = {false};
-+        this.queue.addChunk(pair, prioritySupplier, SystemUtils.a(() -> {
-+            if (!isChunkLightStatus(pair)) {
-+                this.d.c(chunkcoordintpair); // copied from end of method to release light ticket
-+                future.complete(ichunkaccess);
-+                skippedPre[0] = true;
-+                return;
-+            }
-+            // Paper end
++        IntSupplier prioritySupplier1 = d.getPrioritySupplier(pair);
++        IntSupplier prioritySupplier = flag ? () -> Math.max(1, prioritySupplier1.getAsInt() - 10) : prioritySupplier1;
++        this.e.a(ChunkTaskQueueSorter.a(() -> {
++            this.queue.add(pair, prioritySupplier.getAsInt(), LightEngineThreaded.Update.PRE_UPDATE, SystemUtils.a(() -> {
++                // Paper end
              ChunkSection[] achunksection = ichunkaccess.getSections();
  
              for (int i = 0; i < 16; ++i) {
-@@ -152,55 +303,47 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
-                 });
-             }
- 
--            this.d.c(chunkcoordintpair);
-+            this.d.c(chunkcoordintpair); // Paper - if change, copy into !isChunkLightStatus above
+@@ -155,52 +255,51 @@ public class LightEngineThreaded extends LightEngine implements AutoCloseable {
+             this.d.c(chunkcoordintpair);
          }, () -> {
              return "lightChunk " + chunkcoordintpair + " " + flag;
--        }));
--        return CompletableFuture.supplyAsync(() -> {
 +            // Paper start  - merge the 2 together
-+        }), () -> {
-+            if (skippedPre[0]) return; // Paper - future's already complete
+         }));
+-        return CompletableFuture.supplyAsync(() -> {
++
++        this.queue.add(pair, prioritySupplier.getAsInt(), LightEngineThreaded.Update.POST_UPDATE, () -> {
              ichunkaccess.b(true);
              super.b(chunkcoordintpair, false);
 -            return ichunkaccess;
@@ -1253,6 +1187,8 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 +            // Paper start
 +            future.complete(ichunkaccess);
          });
++            queueUpdate(); // run queue now
++        }, pair, prioritySupplier));
 +        return future;
 +        // Paper end
      }
@@ -1284,15 +1220,15 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 -            if (pair.getFirst() == LightEngineThreaded.Update.PRE_UPDATE) {
 -                ((Runnable) pair.getSecond()).run();
 -            }
-+        if (queue.poll(pre, post)) {
++        int i = Math.min(queue.size(), 4);
++        boolean ran = false;
++        while (i-- > 0 && queue.poll(pre, post)) {
 +            pre.forEach(Runnable::run);
 +            pre.clear();
 +            super.a(Integer.MAX_VALUE, true, true);
 +            post.forEach(Runnable::run);
 +            post.clear();
-+        } else {
-+            // might have level updates to go still
-+            super.a(Integer.MAX_VALUE, true, true);
++            ran = true;
          }
 -
 -        objectlistiterator.back(j);
@@ -1305,7 +1241,10 @@ index a9dc8466278f9ec2becbcb643e6e1c973df72b82..9d6d882ad1479771b2a9e7c3a14c71dd
 -            }
 -
 -            objectlistiterator.remove();
--        }
++        if (!ran) {
++            // might have level updates to go still
++            super.a(Integer.MAX_VALUE, true, true);
+         }
 -
 +        // Paper end
      }
@@ -1330,47 +1269,22 @@ index 8cedfdd820cc02a76607b53e0b054fc74654f907..a9795394c9b17f9f0ce4c4f9c8f51a48
      private static final int nibbleBucketSizeMultiplier = Integer.getInteger("Paper.nibbleBucketSize", 3072);
      private static final int maxPoolSize = Integer.getInteger("Paper.maxNibblePoolSize", (int) Math.min(6, Math.max(1, Runtime.getRuntime().maxMemory() / 1024 / 1024 / 1024)) * (nibbleBucketSizeMultiplier * 8));
 diff --git a/src/main/java/net/minecraft/server/PlayerChunk.java b/src/main/java/net/minecraft/server/PlayerChunk.java
-index 446c401b3139f8c6c0e70d883340f0140d94b752..c14cdb60243e16810ad711d204678d51120c3403 100644
+index 446c401b3139f8c6c0e70d883340f0140d94b752..a3bce8f13bf278af2d6870891daa9bf692b4e267 100644
 --- a/src/main/java/net/minecraft/server/PlayerChunk.java
 +++ b/src/main/java/net/minecraft/server/PlayerChunk.java
 @@ -716,6 +716,7 @@ public class PlayerChunk {
                  ioPriority = com.destroystokyo.paper.io.PrioritizedTaskQueue.HIGH_PRIORITY;
              }
              chunkMap.world.asyncChunkTaskManager.raisePriority(location.x, location.z, ioPriority);
-+            chunkMap.world.getChunkProvider().getLightEngine().queue.changePriority(location.pair(), getCurrentPriority(), priority);
++            chunkMap.world.getChunkProvider().getLightEngine().changePriority(location.pair(), getCurrentPriority(), priority);
          }
          if (getCurrentPriority() != priority) {
              this.v.a(this.location, this::getCurrentPriority, priority, this::setPriority); // use preferred priority
 diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
-index a35b161035dd26e437f5c49fd650802281aa66a1..03a79ff9929d0df6b5a2da9d86a31c0c67a4b8cf 100644
+index 2fac2e59ab0712459f03cdacc0f67c1528c5a5bf..5544254a655485b8ef9d2883da4d722fa57c63d9 100644
 --- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
 +++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
-@@ -275,6 +275,7 @@ public class PlayerChunkMap extends IChunkLoader implements PlayerChunk.d {
-     }
-     // Paper end
- 
-+    private final java.util.concurrent.ExecutorService lightThread;
-     public PlayerChunkMap(WorldServer worldserver, Convertable.ConversionSession convertable_conversionsession, DataFixer datafixer, DefinedStructureManager definedstructuremanager, Executor executor, IAsyncTaskHandler<Runnable> iasynctaskhandler, ILightAccess ilightaccess, ChunkGenerator chunkgenerator, WorldLoadListener worldloadlistener, Supplier<WorldPersistentData> supplier, int i, boolean flag) {
-         super(new File(convertable_conversionsession.a(worldserver.getDimensionKey()), "region"), datafixer, flag);
-         //this.visibleChunks = this.updatingChunks.clone(); // Paper - no more cloning
-@@ -306,7 +307,15 @@ public class PlayerChunkMap extends IChunkLoader implements PlayerChunk.d {
-         Mailbox<Runnable> mailbox = Mailbox.a("main", iasynctaskhandler::a);
- 
-         this.worldLoadListener = worldloadlistener;
--        ThreadedMailbox<Runnable> lightthreaded; ThreadedMailbox<Runnable> threadedmailbox1 = lightthreaded = ThreadedMailbox.a(executor, "light"); // Paper
-+        // Paper start - use light thread
-+        ThreadedMailbox<Runnable> lightthreaded; ThreadedMailbox<Runnable> threadedmailbox1 = lightthreaded = ThreadedMailbox.a(lightThread = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-+            Thread thread = new Thread(r);
-+            thread.setName(((WorldDataServer)world.getWorldData()).getName() + " - Light");
-+            thread.setDaemon(true);
-+            thread.setPriority(Thread.NORM_PRIORITY+1);
-+            return thread;
-+        }), "light");
-+        // Paper end
- 
-         this.p = new ChunkTaskQueueSorter(ImmutableList.of(threadedmailbox, mailbox, threadedmailbox1), executor, Integer.MAX_VALUE);
-         this.mailboxWorldGen = this.p.a(threadedmailbox, false);
-@@ -652,6 +661,7 @@ public class PlayerChunkMap extends IChunkLoader implements PlayerChunk.d {
+@@ -653,6 +653,7 @@ public class PlayerChunkMap extends IChunkLoader implements PlayerChunk.d {
          // Paper end
      }
  
@@ -1378,16 +1292,8 @@ index a35b161035dd26e437f5c49fd650802281aa66a1..03a79ff9929d0df6b5a2da9d86a31c0c
      protected IntSupplier c(long i) {
          return () -> {
              PlayerChunk playerchunk = this.getVisibleChunk(i);
-@@ -779,6 +789,7 @@ public class PlayerChunkMap extends IChunkLoader implements PlayerChunk.d {
-     @Override
-     public void close() throws IOException {
-         try {
-+            this.lightThread.shutdown(); // Paper
-             this.p.close();
-             this.world.asyncChunkTaskManager.close(true); // Paper - Required since we're closing regionfiles in the next line
-             this.m.close();
 diff --git a/src/main/java/net/minecraft/server/ThreadedMailbox.java b/src/main/java/net/minecraft/server/ThreadedMailbox.java
-index 35f4d2d9591e625ab0bbeab7b606761e74965eec..cd30215dc098068ae034117c409cb295ebca58c1 100644
+index 35f4d2d9591e625ab0bbeab7b606761e74965eec..698d82dd736529a8cbfad5c6bed70ab97f0064bb 100644
 --- a/src/main/java/net/minecraft/server/ThreadedMailbox.java
 +++ b/src/main/java/net/minecraft/server/ThreadedMailbox.java
 @@ -109,7 +109,8 @@ public class ThreadedMailbox<T> implements Mailbox<T>, AutoCloseable, Runnable {
@@ -1396,15 +1302,15 @@ index 35f4d2d9591e625ab0bbeab7b606761e74965eec..cd30215dc098068ae034117c409cb295
  
 -    @Override
 +
-+    public final void queue(T t0) { a(t0); } @Override // Paper - OBFHELPER
++    public void queue(T t0) { a(t0); } @Override // Paper - OBFHELPER
      public void a(T t0) {
          this.a.a(t0);
          this.f();
 diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
-index a54e3ed06a7a1757d3c4ce96b21bed0177e1fa86..63c119072968586fab05ce3990f7c83373736f33 100644
+index e1cbb3431d3ce9db6698b7d9d296611e4d9a5470..5ee9d3009e04b36d2c61007a1dbe06b2bb1106ff 100644
 --- a/src/main/java/net/minecraft/server/WorldServer.java
 +++ b/src/main/java/net/minecraft/server/WorldServer.java
-@@ -709,6 +709,7 @@ public class WorldServer extends World implements GeneratorAccessSeed {
+@@ -707,6 +707,7 @@ public class WorldServer extends World implements GeneratorAccessSeed {
              }
              gameprofilerfiller.exit();
              timings.chunkTicksBlocks.stopTiming(); // Paper
